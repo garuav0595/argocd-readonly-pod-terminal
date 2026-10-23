@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ArgoCD Read-only Terminal</title>
+  <script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.25.6/babel.min.js"></script>
+  <script src="https://cdn.tailwindcss.com/3.4.10"></script>
+</head>
+<body class="bg-slate-100">
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useRef } = React;
+// Works at / or behind an ingress sub-path (BASE_PATH)
+const BASE = location.pathname.endsWith('/') ? location.pathname : location.pathname + '/';
+
+async function api(p, body) {
+  const token = sessionStorage.getItem('token');
+  const res = await fetch(BASE + p, {
+    method: body ? 'POST' : 'GET',
+    headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (res.status === 401 && token) { sessionStorage.clear(); location.reload(); }
+  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  return data;
+}
+
+const HELP = `Read-only terminal — you can look at files, not change them.
+Allowed: ls  cat  head  tail  grep  find  stat  du  wc  pwd  cd   (plus: help, clear, exit)
+After | you can use: grep  head  tail  wc  sort  uniq
+Examples:
+  ls -la                            cd /var/log
+  tail -n 100 app.log               tail -n 500 app.log | grep -i error
+  grep -rn "error" /var/log         cat app.log | grep ERROR | wc -l
+Keys: Tab = complete, ↑/↓ = history. Select text to copy; Ctrl/Cmd+V to paste.
+Blocked: rm, mv, cp, vi, sh/bash, redirects (>), ; && $( ) and tail -f`;
+
+function Login({ onLogin }) {
+  const [f, setF] = useState({ username: '', password: '' });
+  const [err, setErr] = useState(''); const [busy, setBusy] = useState(false);
+  const submit = async e => {
+    e.preventDefault(); setBusy(true); setErr('');
+    try { const r = await api('api/login', f); sessionStorage.setItem('token', r.token); sessionStorage.setItem('user', r.username); onLogin(r.username); }
+    catch (e) { setErr(e.message); } finally { setBusy(false); }
+  };
+  return (
+    <div className="min-h-screen flex items-center justify-center p-4">
+      <form onSubmit={submit} className="w-full max-w-sm bg-white rounded-2xl border border-slate-200 p-6 space-y-4">
+        <div className="text-center">
+          <div className="text-3xl">🖥️</div>
+          <h1 className="text-xl font-bold text-slate-900 mt-2">ArgoCD Read-only Terminal</h1>
+          <p className="text-sm text-slate-500">Sign in with your ArgoCD account</p>
+        </div>
+        <input className="w-full px-3 py-2 rounded-lg border border-slate-300" placeholder="Username" value={f.username} onChange={e=>setF({...f,username:e.target.value})} autoFocus/>
+        <input className="w-full px-3 py-2 rounded-lg border border-slate-300" placeholder="Password" type="password" value={f.password} onChange={e=>setF({...f,password:e.target.value})}/>
+        {err && <p className="text-sm text-rose-600">{err}</p>}
+        <button disabled={busy} className="w-full py-2 rounded-lg bg-indigo-600 text-white font-semibold disabled:opacity-50">{busy ? 'Signing in…' : 'Sign in'}</button>
+      </form>
+    </div>
+  );
+}
+
+function Terminal({ user, onLogout }) {
+  const [apps, setApps] = useState([]); const [pods, setPods] = useState([]);
+  const [sel, setSel] = useState({ app: '', pod: '', container: '' });
+  const [lines, setLines] = useState([{ t: 'info', s: 'Select an application, pod and container to start. Type "help" for commands.' }]);
+  const [cwd, setCwd] = useState('/'); const [input, setInput] = useState(''); const [busy, setBusy] = useState(false);
+  const [hist, setHist] = useState([]); const [hIdx, setHIdx] = useState(-1);
+  const endRef = useRef(null); const inputRef = useRef(null);
+
+  useEffect(() => { api('api/apps').then(setApps).catch(e => add('err', e.message)); }, []);
+  useEffect(() => { endRef.current?.scrollIntoView({ block: 'end' }); }, [lines]);
+  const add = (t, s) => setLines(l => [...l, { t, s }]);
+
+  const pickApp = async app => {
+    setSel({ app, pod: '', container: '' }); setPods([]);
+    if (app) try { setPods(await api(`api/pods?app=${encodeURIComponent(app)}`)); } catch (e) { add('err', e.message); }
+  };
+  const podObj = pods.find(p => `${p.namespace}/${p.name}` === sel.pod);
+  const pickPod = key => {
+    const p = pods.find(x => `${x.namespace}/${x.name}` === key);
+    setSel(s => ({ ...s, pod: key, container: p?.containers?.[0] || '' })); setCwd('/');
+    if (p) { setLines([{ t: 'info', s: `Connected (read-only) to ${p.namespace}/${p.name}.` }]); setTimeout(() => inputRef.current?.focus(), 50); }
+  };
+  const ready = sel.app && podObj && sel.container;
+  const prompt = `${user}@${podObj?.name || 'pod'}:${cwd}$`;
+  const target = () => ({ app: sel.app, namespace: podObj.namespace, pod: podObj.name, container: sel.container, cwd });
+
+  const run = async () => {
+    const cmd = input.trim(); if (!cmd || busy) return;
+    setInput(''); setHist(h => [cmd, ...h.filter(x => x !== cmd)].slice(0, 50)); setHIdx(-1);
+    if (cmd === 'clear') return setLines([]);
+    if (cmd === 'help') return setLines(l => [...l, { t: 'cmd', s: `${prompt} ${cmd}` }, { t: 'info', s: HELP }]);
+    if (cmd === 'exit') { setLines(l => [...l, { t: 'cmd', s: `${prompt} ${cmd}` }, { t: 'info', s: 'Session closed. Select a pod to start again.' }]); setSel(s => ({ ...s, pod: '', container: '' })); return; }
+    if (!ready) return setLines(l => [...l, { t: 'cmd', s: `${prompt} ${cmd}` }, { t: 'err', s: 'Select an application, pod and container first.' }]);
+    setBusy(true);
+    try {
+      const r = await api('api/exec', { ...target(), command: cmd });
+      setLines(l => [...l, { t: 'cmd', s: `${prompt} ${cmd}` }, ...(r.output ? [{ t: r.ok ? 'out' : 'err', s: r.output }] : [])]);
+      if (r.cwd) setCwd(r.cwd);
+    } catch (e) { setLines(l => [...l, { t: 'cmd', s: `${prompt} ${cmd}` }, { t: 'err', s: e.message }]); }
+    finally { setBusy(false); setTimeout(() => inputRef.current?.focus(), 0); }
+  };
+
+  const complete = async () => {
+    if (!ready || busy) return;
+    const word = input.match(/(\S*)$/)[1];
+    try {
+      const r = await api('api/complete', { ...target(), line: input });
+      const m = r.matches || []; if (!m.length) return;
+      const lead = input.slice(0, input.length - word.length) + (r.base || '');
+      if (m.length === 1) return setInput(lead + m[0]);
+      let common = m[0]; for (const x of m) while (!x.startsWith(common)) common = common.slice(0, -1);
+      if (common.length > word.slice((r.base || '').length).length) setInput(lead + common);
+      else setLines(l => [...l, { t: 'cmd', s: `${prompt} ${input}` }, { t: 'out', s: m.map(x => x.trimEnd()).join('    ') }]);
+    } catch (_) {}
+  };
+  const onKey = e => {
+    if (e.key === 'Tab') { e.preventDefault(); complete(); }
+    else if (e.key === 'Enter') { e.preventDefault(); run(); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); const i = Math.min(hIdx + 1, hist.length - 1); if (i >= 0) { setHIdx(i); setInput(hist[i]); } }
+    else if (e.key === 'ArrowDown') { e.preventDefault(); const i = hIdx - 1; setHIdx(i); setInput(i >= 0 ? hist[i] : ''); }
+  };
+
+  const sc = "px-3 py-2 text-sm rounded-lg border border-slate-300 bg-white disabled:bg-slate-100";
+  return (
+    <div className="max-w-6xl mx-auto p-5 space-y-4">
+      <header className="flex items-center justify-between">
+        <div className="font-bold text-slate-900">🖥️ ArgoCD Read-only Terminal <span className="ml-1 text-xs px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700">read-only</span></div>
+        <div className="text-sm text-slate-500">{user} · <button className="font-semibold text-slate-700" onClick={onLogout}>Logout</button></div>
+      </header>
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+        <select className={sc} value={sel.app} onChange={e => pickApp(e.target.value)}>
+          <option value="">Application…</option>{apps.map(a => <option key={a.name} value={a.name}>{a.name} ({a.project})</option>)}
+        </select>
+        <select className={sc} value={sel.pod} disabled={!sel.app} onChange={e => pickPod(e.target.value)}>
+          <option value="">{sel.app && !pods.length ? 'No running pods' : 'Pod…'}</option>
+          {pods.map(p => <option key={`${p.namespace}/${p.name}`} value={`${p.namespace}/${p.name}`}>{p.name}</option>)}
+        </select>
+        <select className={sc} value={sel.container} disabled={!podObj} onChange={e => setSel(s => ({ ...s, container: e.target.value }))}>
+          <option value="">Container…</option>{(podObj?.containers || []).map(c => <option key={c}>{c}</option>)}
+        </select>
+      </div>
+      <div className="rounded-2xl bg-slate-950 border border-slate-800 select-text" onMouseUp={() => { if (!window.getSelection()?.toString()) inputRef.current?.focus(); }}>
+        <div className="h-[480px] overflow-y-auto p-4 font-mono text-[13px] leading-relaxed">
+          {lines.map((l, i) => <pre key={i} className={`whitespace-pre-wrap break-all m-0 ${l.t === 'cmd' ? 'text-emerald-400' : l.t === 'err' ? 'text-rose-400' : l.t === 'info' ? 'text-sky-300' : 'text-slate-200'}`}>{l.s}</pre>)}
+          <div className="flex gap-2 text-emerald-400">
+            <span className="shrink-0">{prompt}</span>
+            <input ref={inputRef} value={input} onChange={e => setInput(e.target.value)} onKeyDown={onKey} disabled={busy}
+              spellCheck={false} autoComplete="off" className="flex-1 bg-transparent outline-none text-slate-100"/>
+          </div>
+          <div ref={endRef}/>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function App() {
+  const [user, setUser] = useState(sessionStorage.getItem('user'));
+  return user ? <Terminal user={user} onLogout={() => { sessionStorage.clear(); setUser(null); }}/> : <Login onLogin={setUser}/>;
+}
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>
