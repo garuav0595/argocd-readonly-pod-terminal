@@ -1,0 +1,33 @@
+# The terminal's service account may list pods and open exec sessions.
+# It can NOT delete or edit anything; the app itself only sends allow-listed read
+# commands as argv (no shell). Users never get these permissions directly.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: readonly-terminal
+  namespace: argocd
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: readonly-terminal
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create", "get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: readonly-terminal
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: readonly-terminal
+subjects:
+  - kind: ServiceAccount
+    name: readonly-terminal
+    namespace: argocd

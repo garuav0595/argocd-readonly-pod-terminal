@@ -1,0 +1,16 @@
+# Example: serve the terminal next to ArgoCD at https://argocd.example.com/terminal/
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: readonly-terminal
+  namespace: argocd
+spec:
+  ingressClassName: nginx
+  tls: [{ hosts: [argocd.example.com], secretName: argocd-tls }]
+  rules:
+    - host: argocd.example.com
+      http:
+        paths:
+          - path: /terminal
+            pathType: Prefix
+            backend: { service: { name: readonly-terminal, port: { number: 80 } } }

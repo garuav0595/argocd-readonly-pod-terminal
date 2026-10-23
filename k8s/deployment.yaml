@@ -1,0 +1,46 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: readonly-terminal
+  namespace: argocd
+  labels: { app: readonly-terminal }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: readonly-terminal }
+  template:
+    metadata:
+      labels: { app: readonly-terminal }
+    spec:
+      serviceAccountName: readonly-terminal
+      containers:
+        - name: terminal
+          image: ghcr.io/garuav0595/argocd-readonly-pod-terminal:1.0.0   # build & push your own
+          ports: [{ containerPort: 3000 }]
+          env:
+            - { name: ARGOCD_SERVER, value: "https://argocd-server.argocd.svc.cluster.local" }
+            - { name: ARGOCD_INSECURE, value: "true" }        # in-cluster self-signed cert
+            - { name: BASE_PATH, value: "/terminal" }         # served at https://<argocd-host>/terminal/
+            - { name: AUDIT_LOG_FILE, value: "/data/audit.log" }
+          volumeMounts: [{ name: audit, mountPath: /data }]
+          readinessProbe: { httpGet: { path: /terminal/healthz, port: 3000 }, periodSeconds: 10 }
+          livenessProbe: { httpGet: { path: /terminal/healthz, port: 3000 }, periodSeconds: 30 }
+          resources:
+            requests: { cpu: 50m, memory: 96Mi }
+            limits: { cpu: 500m, memory: 256Mi }
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+      volumes:
+        - name: audit
+          emptyDir: {}            # use a PVC to keep the audit log across restarts
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: readonly-terminal
+  namespace: argocd
+spec:
+  selector: { app: readonly-terminal }
+  ports: [{ port: 80, targetPort: 3000 }]
